@@ -1,9 +1,38 @@
 from __future__ import annotations
 
-import time
-
 from .stats import summarize_throughput
 from .system_utils import mib_from_bytes
+
+
+def _pick_inner_iterations(single_elapsed_sec: float, target_round_sec: float, max_iterations: int) -> int:
+    if single_elapsed_sec <= 0:
+        return 1
+
+    estimate = int(target_round_sec / single_elapsed_sec)
+    if estimate < 1:
+        return 1
+    if estimate > max_iterations:
+        return max_iterations
+    return estimate
+
+
+def _cuda_elapsed_sec(torch_module, device: int, fn) -> float:
+    start_event = torch_module.cuda.Event(enable_timing=True)
+    end_event = torch_module.cuda.Event(enable_timing=True)
+
+    torch_module.cuda.synchronize(device)
+    start_event.record()
+    fn()
+    end_event.record()
+    torch_module.cuda.synchronize(device)
+
+    # elapsed_time returns milliseconds measured on GPU timeline.
+    return float(start_event.elapsed_time(end_event)) / 1000.0
+
+
+def _run_repeated(fn, repeat: int) -> None:
+    for _ in range(repeat):
+        fn()
 
 
 def _disable_tf32(torch_module) -> bool:
@@ -27,22 +56,34 @@ def _gpu_matmul_fp32(torch_module, device: int, matrix_size: int, rounds: int) -
     torch_module.cuda.set_device(device)
     a = torch_module.randn((matrix_size, matrix_size), device=device, dtype=torch_module.float32)
     b = torch_module.randn((matrix_size, matrix_size), device=device, dtype=torch_module.float32)
+    out = torch_module.empty_like(a)
 
     # Warmup to avoid startup cost skew.
     for _ in range(2):
-        _ = a @ b
+        torch_module.mm(a, b, out=out)
     torch_module.cuda.synchronize(device)
+
+    single_elapsed = _cuda_elapsed_sec(
+        torch_module=torch_module,
+        device=device,
+        fn=lambda: torch_module.mm(a, b, out=out),
+    )
+    inner_iterations = _pick_inner_iterations(
+        single_elapsed_sec=single_elapsed,
+        target_round_sec=0.2,
+        max_iterations=1024,
+    )
 
     round_rows: list[dict] = []
     series: list[float] = []
     for idx in range(rounds):
-        torch_module.cuda.synchronize(device)
-        started = time.perf_counter()
-        _ = a @ b
-        torch_module.cuda.synchronize(device)
-        elapsed = time.perf_counter() - started
+        elapsed = _cuda_elapsed_sec(
+            torch_module=torch_module,
+            device=device,
+            fn=lambda: _run_repeated(lambda: torch_module.mm(a, b, out=out), inner_iterations),
+        )
 
-        ops = 2.0 * (matrix_size**3)
+        ops = 2.0 * (matrix_size**3) * inner_iterations
         gflops = ops / elapsed / 1e9
         series.append(gflops)
 
@@ -50,6 +91,7 @@ def _gpu_matmul_fp32(torch_module, device: int, matrix_size: int, rounds: int) -
             {
                 "round": idx + 1,
                 "elapsed_sec": elapsed,
+                "inner_iterations": inner_iterations,
                 "gflops": gflops,
             }
         )
@@ -58,6 +100,8 @@ def _gpu_matmul_fp32(torch_module, device: int, matrix_size: int, rounds: int) -
     return {
         "unit": "GFLOPS",
         "matrix_size": matrix_size,
+        "timing_method": "cuda_event",
+        "inner_iterations": inner_iterations,
         "rounds": round_rows,
         "best": summary["best"],
         "median": summary["median"],
@@ -78,17 +122,30 @@ def _gpu_copy_bandwidth(torch_module, device: int, copy_size_mib: int, rounds: i
     dst = torch_module.empty_like(src)
 
     torch_module.cuda.synchronize(device)
+
+    single_elapsed = _cuda_elapsed_sec(
+        torch_module=torch_module,
+        device=device,
+        fn=lambda: dst.copy_(src),
+    )
+    inner_iterations = _pick_inner_iterations(
+        single_elapsed_sec=single_elapsed,
+        target_round_sec=0.2,
+        max_iterations=8192,
+    )
+
     series: list[float] = []
     round_rows: list[dict] = []
 
     for idx in range(rounds):
-        torch_module.cuda.synchronize(device)
-        started = time.perf_counter()
-        dst.copy_(src)
-        torch_module.cuda.synchronize(device)
-        elapsed = time.perf_counter() - started
+        elapsed = _cuda_elapsed_sec(
+            torch_module=torch_module,
+            device=device,
+            fn=lambda: _run_repeated(lambda: dst.copy_(src), inner_iterations),
+        )
 
-        gib_per_sec = (test_bytes / (1024.0**3)) / elapsed
+        moved_bytes = float(test_bytes) * float(inner_iterations)
+        gib_per_sec = (moved_bytes / (1024.0**3)) / elapsed
         series.append(gib_per_sec)
         round_rows.append(
             {
@@ -96,6 +153,7 @@ def _gpu_copy_bandwidth(torch_module, device: int, copy_size_mib: int, rounds: i
                 "elapsed_sec": elapsed,
                 "gib_per_sec": gib_per_sec,
                 "copy_size_mib": test_bytes / (1024.0 * 1024.0),
+                "inner_iterations": inner_iterations,
             }
         )
 
@@ -104,6 +162,8 @@ def _gpu_copy_bandwidth(torch_module, device: int, copy_size_mib: int, rounds: i
         "unit": "GiB/s",
         "requested_copy_size_mib": copy_size_mib,
         "effective_copy_size_mib": test_bytes / (1024.0 * 1024.0),
+        "timing_method": "cuda_event",
+        "inner_iterations": inner_iterations,
         "rounds": round_rows,
         "best": summary["best"],
         "median": summary["median"],

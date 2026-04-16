@@ -7,6 +7,8 @@ PerfProbe is a focused deep-learning server probe tool. It collects only the req
 - CPU: model, logical cores, physical cores, FP32 matmul GFLOPS (best/median/avg)
 - Memory: total/available RAM and DIMM details when accessible
 - GPU: device info, FP32 non-Tensor-Core path benchmark (TF32 disabled), memory copy bandwidth
+
+Note on GPU utilization: `nvidia-smi` utilization not staying at 100% does not automatically mean benchmark numbers are invalid. PerfProbe GPU timing uses CUDA events and batched inner iterations per round to reduce CPU-side timing noise and short-kernel sampling bias.
 - Disk: mixed read benchmark for 1 image + 1 mask groups, outputs groups/s and MiB/s, supports multi-disk ranking
 - Network: link status/speed, active NIC count, best active NIC summary
 

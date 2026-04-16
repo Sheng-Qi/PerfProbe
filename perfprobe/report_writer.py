@@ -122,13 +122,14 @@ def render_markdown_report(report: dict) -> str:
         )
 
     lines.append("")
-    lines.append("| GPU FP32 / Copy Bandwidth | MatMul Best GFLOPS | MatMul Avg GFLOPS | Copy Best GiB/s | Copy Median GiB/s |")
-    lines.append("| --- | ---: | ---: | ---: | ---: |")
+    lines.append("| GPU FP32 / Copy Bandwidth | MatMul Best GFLOPS | MatMul Avg GFLOPS | MatMul Iters/Round | Copy Best GiB/s | Copy Median GiB/s | Copy Iters/Round | Timing |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
     for dev in gpu.get("devices", []):
         matmul = dev.get("fp32_matmul") or {}
         copy = dev.get("memory_copy_bandwidth") or {}
+        timer = matmul.get("timing_method") or copy.get("timing_method") or "-"
         lines.append(
-            f"| gpu:{dev.get('index', '-')} | {_fmt(matmul.get('best'))} | {_fmt(matmul.get('avg'))} | {_fmt(copy.get('best'))} | {_fmt(copy.get('median'))} |"
+            f"| gpu:{dev.get('index', '-')} | {_fmt(matmul.get('best'))} | {_fmt(matmul.get('avg'))} | {_fmt(matmul.get('inner_iterations'))} | {_fmt(copy.get('best'))} | {_fmt(copy.get('median'))} | {_fmt(copy.get('inner_iterations'))} | {timer} |"
         )
     lines.append("")
 
