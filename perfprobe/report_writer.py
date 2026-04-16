@@ -20,6 +20,13 @@ def _status_line(section: dict) -> str:
     return f"status={status}"
 
 
+def _short_text(value: object, max_len: int = 220) -> str:
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 def write_json_report(report: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -128,6 +135,8 @@ def render_markdown_report(report: dict) -> str:
     lines.append("## Disk Mixed Read")
     disk = report.get("disk", {})
     lines.append(f"- {_status_line(disk)}")
+    if disk.get("tool"):
+        lines.append(f"- Benchmark tool: {disk.get('tool')}")
     definition = disk.get("definition", {})
     if definition:
         lines.append(
@@ -145,11 +154,11 @@ def render_markdown_report(report: dict) -> str:
         cleanup = mount.get("cleanup") or {}
         cleanup_text = cleanup.get("status", "-")
         if cleanup.get("reason"):
-            cleanup_text += f" ({cleanup.get('reason')})"
+            cleanup_text += f" ({_short_text(cleanup.get('reason'))})"
         reason = mount.get("skip_reason")
         status_text = mount.get("status", "-")
         if reason:
-            status_text += f" ({reason})"
+            status_text += f" ({_short_text(reason)})"
         lines.append(
             f"| {mount.get('mount_point', '-')} | {status_text} | {_fmt(groups.get('best'))} | {_fmt(groups.get('median'))} | {_fmt(groups.get('avg'))} | {_fmt(mib.get('best'))} | {_fmt(mib.get('median'))} | {cleanup_text} |"
         )

@@ -24,7 +24,7 @@ python3 perfprobe.py
 scripts/run_perfprobe.sh
 ```
 
-The beginner script can install required system tools (`dmidecode`, `ethtool`, `pciutils`, `util-linux`) and Python dependencies into `.venv`, then run the benchmark.
+The beginner script can install required system tools (`dmidecode`, `ethtool`, `fio`, `pciutils`, `util-linux`) and Python dependencies into `.venv`, then run the benchmark.
 
 ### Run-only mode
 
@@ -73,6 +73,7 @@ The JSON schema is stable and includes:
 - `groups/s` means number of complete image+mask groups read per second
 - `MiB/s` is preserved for cross-checking throughput
 - `best`, `median`, and `avg` are calculated from multi-round results
+- Disk benchmark is driven by `fio` (`ioengine=psync`, `direct=1`) to reduce Python overhead and page-cache bias
 
 ## Permissions and execution identity
 
@@ -101,6 +102,9 @@ This affects mount coverage and DIMM details availability. Permission-limited it
 - Most mounts skipped:
   - Run with elevated privilege for broader access
   - Use `--include-root-mount` if root filesystem should be part of comparison
+- Disk benchmark failed:
+  - Verify `fio` is installed and in `PATH`
+  - Some filesystems may reject direct I/O; check disk section `skip_reason` for details
 
 ## Development notes
 

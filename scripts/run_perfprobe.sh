@@ -39,17 +39,17 @@ fct_run_with_privilege() {
 fct_install_system_deps() {
     if command -v apt-get >/dev/null 2>&1; then
         fct_run_with_privilege apt-get update || true
-        fct_run_with_privilege apt-get install -y dmidecode ethtool pciutils util-linux || true
+        fct_run_with_privilege apt-get install -y dmidecode ethtool fio pciutils util-linux || true
         return
     fi
 
     if command -v dnf >/dev/null 2>&1; then
-        fct_run_with_privilege dnf install -y dmidecode ethtool pciutils util-linux || true
+        fct_run_with_privilege dnf install -y dmidecode ethtool fio pciutils util-linux || true
         return
     fi
 
     if command -v yum >/dev/null 2>&1; then
-        fct_run_with_privilege yum install -y dmidecode ethtool pciutils util-linux || true
+        fct_run_with_privilege yum install -y dmidecode ethtool fio pciutils util-linux || true
         return
     fi
 

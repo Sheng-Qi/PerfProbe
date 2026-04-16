@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import random
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -9,7 +12,7 @@ import psutil
 
 from .cleanup_guard import SAFE_MARKER_CONTENT, SAFE_MARKER_FILE, SAFE_SAMPLE_PREFIX, safe_cleanup
 from .stats import summarize_throughput
-from .system_utils import bytes_from_kib, bytes_from_mib
+from .system_utils import bytes_from_kib, bytes_from_mib, run_command
 
 PSEUDO_FS_TYPES = {
     "autofs",
@@ -35,6 +38,9 @@ PSEUDO_FS_TYPES = {
 }
 
 BOOT_MOUNTS = {"/boot", "/boot/efi"}
+FIO_IOENGINE = "psync"
+FIO_BLOCK_SIZE = "4k"
+FIO_TIMEOUT_SEC = 1800
 
 
 def _write_fixed_size(path: Path, size_bytes: int) -> None:
@@ -74,19 +80,103 @@ def _prepare_sample_pool(
     return sample_dir, groups
 
 
-def _read_all(path: Path) -> int:
-    read_bytes = 0
-    with path.open("rb") as handle:
-        while True:
-            data = handle.read(1024 * 1024)
-            if not data:
-                break
-            read_bytes += len(data)
-    return read_bytes
+def _write_fio_jobfile(file_paths: list[Path], jobfile_path: Path) -> None:
+    lines = [
+        "[global]",
+        "rw=read",
+        f"ioengine={FIO_IOENGINE}",
+        "direct=1",
+        "thread=1",
+        "group_reporting=1",
+        f"bs={FIO_BLOCK_SIZE}",
+        "",  # spacing for readability
+    ]
+
+    for index, file_path in enumerate(file_paths):
+        lines.append(f"[job_{index:05d}]")
+        lines.append(f"filename={file_path}")
+        lines.append("")
+
+    jobfile_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _build_fio_command_with_jobfile(jobfile_path: Path) -> list[str]:
+    return [
+        "fio",
+        "--max-jobs=1",
+        "--output-format=json",
+        str(jobfile_path),
+    ]
+
+
+def _extract_fio_round_metrics(fio_json: dict, group_size_bytes: int) -> dict:
+    jobs = fio_json.get("jobs", [])
+    if not jobs:
+        raise ValueError("fio output missing jobs array")
+
+    read_stats = jobs[0].get("read")
+    if not isinstance(read_stats, dict):
+        raise ValueError("fio output missing read stats")
+
+    io_bytes = int(read_stats.get("io_bytes", 0))
+    bw_bytes = float(read_stats.get("bw_bytes", 0.0))
+    runtime_ms = float(read_stats.get("runtime", 0.0))
+    iops = float(read_stats.get("iops", 0.0))
+
+    if bw_bytes <= 0.0 and io_bytes > 0 and runtime_ms > 0:
+        bw_bytes = io_bytes / (runtime_ms / 1000.0)
+
+    if bw_bytes <= 0.0:
+        raise ValueError("fio reported non-positive bandwidth")
+
+    groups_per_sec = bw_bytes / float(group_size_bytes)
+    mib_per_sec = bw_bytes / (1024.0 * 1024.0)
+    return {
+        "io_bytes": io_bytes,
+        "bw_bytes_per_sec": bw_bytes,
+        "runtime_ms": runtime_ms,
+        "iops": iops,
+        "groups_per_sec": groups_per_sec,
+        "mib_per_sec": mib_per_sec,
+    }
+
+
+def _run_fio_once(file_paths: list[Path]) -> dict:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".fio",
+        prefix="perfprobe-round-",
+        delete=False,
+        encoding="utf-8",
+    ) as handle:
+        jobfile_path = Path(handle.name)
+
+    try:
+        _write_fio_jobfile(file_paths=file_paths, jobfile_path=jobfile_path)
+        command = _build_fio_command_with_jobfile(jobfile_path)
+        command_result = run_command(command, timeout_sec=FIO_TIMEOUT_SEC)
+    finally:
+        try:
+            jobfile_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if command_result.code != 0:
+        message = command_result.stderr or command_result.stdout or "fio execution failed"
+        raise RuntimeError(message)
+
+    try:
+        return json.loads(command_result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"fio returned invalid JSON: {exc}") from exc
 
 
 def _run_mixed_read_benchmark(groups: list[tuple[Path, Path, int]], rounds: int) -> dict:
+    if not groups:
+        raise ValueError("no sample groups prepared for disk benchmark")
+
     randomizer = random.Random(20260416)
+    group_size_bytes = groups[0][2]
 
     rounds_rows: list[dict] = []
     groups_series: list[float] = []
@@ -96,25 +186,33 @@ def _run_mixed_read_benchmark(groups: list[tuple[Path, Path, int]], rounds: int)
         ordered = groups.copy()
         randomizer.shuffle(ordered)
 
-        started = time.perf_counter()
-        total_bytes = 0
-        for image_path, mask_path, _total_expected in ordered:
-            total_bytes += _read_all(image_path)
-            total_bytes += _read_all(mask_path)
-        elapsed = time.perf_counter() - started
+        round_paths: list[Path] = []
+        expected_total_bytes = 0
+        for image_path, mask_path, total_expected in ordered:
+            round_paths.extend([image_path, mask_path])
+            expected_total_bytes += total_expected
 
-        groups_per_sec = len(ordered) / elapsed
-        mib_per_sec = (total_bytes / (1024.0 * 1024.0)) / elapsed
+        fio_payload = _run_fio_once(round_paths)
+        metrics = _extract_fio_round_metrics(fio_json=fio_payload, group_size_bytes=group_size_bytes)
+        if metrics["io_bytes"] < expected_total_bytes:
+            raise RuntimeError(
+                "fio read bytes is lower than expected sample bytes "
+                f"({metrics['io_bytes']} < {expected_total_bytes})"
+            )
 
-        groups_series.append(groups_per_sec)
-        mib_series.append(mib_per_sec)
+        groups_series.append(metrics["groups_per_sec"])
+        mib_series.append(metrics["mib_per_sec"])
         rounds_rows.append(
             {
                 "round": round_index + 1,
-                "elapsed_sec": elapsed,
-                "groups_per_sec": groups_per_sec,
-                "mib_per_sec": mib_per_sec,
+                "groups_per_sec": metrics["groups_per_sec"],
+                "mib_per_sec": metrics["mib_per_sec"],
                 "group_count": len(ordered),
+                "fio_io_bytes": metrics["io_bytes"],
+                "fio_bw_bytes_per_sec": metrics["bw_bytes_per_sec"],
+                "fio_runtime_ms": metrics["runtime_ms"],
+                "fio_iops": metrics["iops"],
+                "expected_total_bytes": expected_total_bytes,
             }
         )
 
@@ -122,6 +220,14 @@ def _run_mixed_read_benchmark(groups: list[tuple[Path, Path, int]], rounds: int)
     mib_summary = summarize_throughput(mib_series)
 
     return {
+        "tool": "fio",
+        "fio_config": {
+            "ioengine": FIO_IOENGINE,
+            "direct": True,
+            "bs": FIO_BLOCK_SIZE,
+            "max_jobs": 1,
+            "input_mode": "jobfile",
+        },
         "rounds": rounds_rows,
         "groups_per_sec": {
             "best": groups_summary["best"],
@@ -229,6 +335,7 @@ def probe_disk(
     result: dict = {
         "status": "ok",
         "reason": None,
+        "tool": "fio",
         "definition": {
             "group": "1 image + 1 mask",
             "image_target_mib": image_size_mib,
@@ -238,6 +345,11 @@ def probe_disk(
         "skipped_mounts": [],
         "ranking_by_groups_per_sec": [],
     }
+
+    if shutil.which("fio") is None:
+        result["status"] = "failed"
+        result["reason"] = "fio not found in PATH"
+        return result
 
     candidates, skipped = _candidate_mounts(multi_disk=multi_disk, include_root_mount=include_root_mount)
     candidates = _ensure_baseline(candidates)
