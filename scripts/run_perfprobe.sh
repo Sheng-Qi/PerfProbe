@@ -7,6 +7,7 @@ readonly VENV_DIR="${PROJECT_ROOT}/.venv"
 readonly REQUIREMENTS_FILE="${PROJECT_ROOT}/requirements.txt"
 readonly TORCH_WHL_BASE_URL="https://download.pytorch.org/whl"
 readonly TORCH_CPU_INDEX_URL="${TORCH_WHL_BASE_URL}/cpu"
+readonly PYPI_INDEX_URL="https://pypi.org/simple"
 
 fct_usage() {
     cat <<'EOF'
@@ -150,7 +151,19 @@ PY
 
 fct_install_torch_cpu_only() {
     printf 'Info: installing CPU-only PyTorch\n' >&2
-    "${VENV_DIR}/bin/python3" -m pip install --upgrade --index-url "${TORCH_CPU_INDEX_URL}" "torch>=2.1"
+    "${VENV_DIR}/bin/python3" -m pip install --upgrade --force-reinstall --index-url "${TORCH_CPU_INDEX_URL}" --extra-index-url "${PYPI_INDEX_URL}" "torch>=2.1"
+}
+
+fct_print_torch_cuda_failure_hint() {
+    local driver_version="$1"
+    local cuda_version="$2"
+
+    printf '\nError: failed to install a CUDA-compatible PyTorch build for this host.\n' >&2
+    printf 'Detected NVIDIA driver: %s\n' "${driver_version:-unknown}" >&2
+    printf 'Detected max CUDA from nvidia-smi: %s\n' "${cuda_version:-unknown}" >&2
+    printf 'PerfProbe will not fall back to CPU-only torch on NVIDIA hosts.\n' >&2
+    printf 'Please update the driver, or run without GPU benchmark via:\n' >&2
+    printf '  scripts/run_perfprobe.sh --run-only -- --no-gpu\n\n' >&2
 }
 
 fct_install_torch_for_driver() {
@@ -170,10 +183,16 @@ fct_install_torch_for_driver() {
     cuda_version="$(fct_get_cuda_version_from_nvidia_smi || true)"
     channels_line="$(fct_get_torch_cuda_channels "${cuda_version}")"
 
+    if [[ -z "${driver_version}" ]]; then
+        printf 'Error: failed to read NVIDIA driver version from nvidia-smi\n' >&2
+        fct_print_torch_cuda_failure_hint "unknown" "${cuda_version:-unknown}"
+        return 1
+    fi
+
     if [[ -z "${channels_line}" ]]; then
-        printf 'Warning: detected NVIDIA driver=%s but CUDA capability is below 11.8, using CPU-only PyTorch\n' "${driver_version:-unknown}" >&2
-        fct_install_torch_cpu_only
-        return
+        printf 'Error: detected NVIDIA driver=%s but CUDA capability is below 11.8\n' "${driver_version:-unknown}" >&2
+        fct_print_torch_cuda_failure_hint "${driver_version}" "${cuda_version:-unknown}"
+        return 1
     fi
 
     read -r -a channels <<<"${channels_line}"
@@ -181,7 +200,7 @@ fct_install_torch_for_driver() {
 
     for channel in "${channels[@]}"; do
         printf 'Info: trying PyTorch wheel channel %s\n' "${channel}" >&2
-        if ! "${VENV_DIR}/bin/python3" -m pip install --upgrade --index-url "${TORCH_WHL_BASE_URL}/${channel}" "torch>=2.1"; then
+        if ! "${VENV_DIR}/bin/python3" -m pip install --upgrade --force-reinstall --index-url "${TORCH_WHL_BASE_URL}/${channel}" --extra-index-url "${PYPI_INDEX_URL}" "torch>=2.1"; then
             printf 'Warning: install from %s failed, trying older CUDA channel\n' "${channel}" >&2
             continue
         fi
@@ -194,8 +213,9 @@ fct_install_torch_for_driver() {
         printf 'Warning: torch from %s installed but CUDA init is unavailable, trying older channel\n' "${channel}" >&2
     done
 
-    printf 'Warning: no CUDA-compatible torch wheel found for this driver, falling back to CPU-only build\n' >&2
-    fct_install_torch_cpu_only
+    printf 'Error: no CUDA-compatible torch wheel found for this driver after trying channels: %s\n' "${channels_line}" >&2
+    fct_print_torch_cuda_failure_hint "${driver_version}" "${cuda_version:-unknown}"
+    return 1
 }
 
 fct_install_python_requirements_except_torch() {
