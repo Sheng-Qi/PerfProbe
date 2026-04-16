@@ -26,6 +26,8 @@ scripts/run_perfprobe.sh
 
 The beginner script can install required system tools (`dmidecode`, `ethtool`, `fio`, `pciutils`, `util-linux`) and Python dependencies into `.venv`, then run the benchmark.
 
+For GPU environments, the script auto-detects NVIDIA driver/CUDA capability and installs a compatible PyTorch wheel channel (tries newer CUDA wheels first, then older ones, and finally falls back to CPU-only PyTorch when no compatible CUDA wheel can be initialized).
+
 ### Run-only mode
 
 Skip install steps and run directly:
@@ -96,6 +98,7 @@ This affects mount coverage and DIMM details availability. Permission-limited it
 
 - GPU benchmark skipped/failed:
   - Verify PyTorch and CUDA availability (`python3 -c "import torch; print(torch.cuda.is_available())"`)
+  - Recreate `.venv` and rerun `scripts/run_perfprobe.sh`; it will auto-select a compatible PyTorch CUDA channel from detected driver capability
 - DIMM details unavailable:
   - Install `dmidecode`
   - Run with suitable privileges if required

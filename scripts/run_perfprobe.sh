@@ -5,6 +5,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly VENV_DIR="${PROJECT_ROOT}/.venv"
 readonly REQUIREMENTS_FILE="${PROJECT_ROOT}/requirements.txt"
+readonly TORCH_WHL_BASE_URL="https://download.pytorch.org/whl"
+readonly TORCH_CPU_INDEX_URL="${TORCH_WHL_BASE_URL}/cpu"
 
 fct_usage() {
     cat <<'EOF'
@@ -59,6 +61,155 @@ fct_install_system_deps() {
 
 fct_get_python_minor_version() {
     python3 -V 2>&1 | awk '{print $2}' | cut -d. -f1,2
+}
+
+fct_get_cuda_version_from_nvidia_smi() {
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        return 1
+    fi
+
+    nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9]\+\.[0-9]\+\).*/\1/p' | head -n1
+}
+
+fct_get_nvidia_driver_version() {
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        return 1
+    fi
+
+    nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]'
+}
+
+fct_version_to_int() {
+    local version="$1"
+    local major=""
+    local minor=""
+
+    if [[ ! "${version}" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+        return 1
+    fi
+
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    printf '%d\n' "$((10#${major} * 100 + 10#${minor}))"
+}
+
+fct_get_torch_cuda_channels() {
+    local cuda_version="$1"
+    local cuda_int=""
+
+    if ! cuda_int="$(fct_version_to_int "${cuda_version}" 2>/dev/null)"; then
+        printf '%s\n' "cu128 cu126 cu124 cu121 cu118"
+        return
+    fi
+
+    if [[ "${cuda_int}" -ge 12080 ]]; then
+        printf '%s\n' "cu128 cu126 cu124 cu121 cu118"
+        return
+    fi
+
+    if [[ "${cuda_int}" -ge 12060 ]]; then
+        printf '%s\n' "cu126 cu124 cu121 cu118"
+        return
+    fi
+
+    if [[ "${cuda_int}" -ge 12040 ]]; then
+        printf '%s\n' "cu124 cu121 cu118"
+        return
+    fi
+
+    if [[ "${cuda_int}" -ge 12010 ]]; then
+        printf '%s\n' "cu121 cu118"
+        return
+    fi
+
+    if [[ "${cuda_int}" -ge 11080 ]]; then
+        printf '%s\n' "cu118"
+        return
+    fi
+
+    printf '%s\n' ""
+}
+
+fct_torch_cuda_ready() {
+    "${VENV_DIR}/bin/python3" - <<'PY'
+import sys
+
+try:
+    import torch
+except Exception:
+    sys.exit(1)
+
+try:
+    available = bool(torch.cuda.is_available()) and torch.cuda.device_count() > 0
+except Exception:
+    available = False
+
+sys.exit(0 if available else 1)
+PY
+}
+
+fct_install_torch_cpu_only() {
+    printf 'Info: installing CPU-only PyTorch\n' >&2
+    "${VENV_DIR}/bin/python3" -m pip install --upgrade --index-url "${TORCH_CPU_INDEX_URL}" "torch>=2.1"
+}
+
+fct_install_torch_for_driver() {
+    local driver_version=""
+    local cuda_version=""
+    local channels_line=""
+    local channel=""
+    local -a channels=()
+
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        printf 'Info: nvidia-smi not found, skip CUDA wheel selection\n' >&2
+        fct_install_torch_cpu_only
+        return
+    fi
+
+    driver_version="$(fct_get_nvidia_driver_version || true)"
+    cuda_version="$(fct_get_cuda_version_from_nvidia_smi || true)"
+    channels_line="$(fct_get_torch_cuda_channels "${cuda_version}")"
+
+    if [[ -z "${channels_line}" ]]; then
+        printf 'Warning: detected NVIDIA driver=%s but CUDA capability is below 11.8, using CPU-only PyTorch\n' "${driver_version:-unknown}" >&2
+        fct_install_torch_cpu_only
+        return
+    fi
+
+    read -r -a channels <<<"${channels_line}"
+    printf 'Info: detected NVIDIA driver=%s, max CUDA=%s\n' "${driver_version:-unknown}" "${cuda_version:-unknown}" >&2
+
+    for channel in "${channels[@]}"; do
+        printf 'Info: trying PyTorch wheel channel %s\n' "${channel}" >&2
+        if ! "${VENV_DIR}/bin/python3" -m pip install --upgrade --index-url "${TORCH_WHL_BASE_URL}/${channel}" "torch>=2.1"; then
+            printf 'Warning: install from %s failed, trying older CUDA channel\n' "${channel}" >&2
+            continue
+        fi
+
+        if fct_torch_cuda_ready; then
+            printf 'Info: selected CUDA-compatible PyTorch channel %s\n' "${channel}" >&2
+            return
+        fi
+
+        printf 'Warning: torch from %s installed but CUDA init is unavailable, trying older channel\n' "${channel}" >&2
+    done
+
+    printf 'Warning: no CUDA-compatible torch wheel found for this driver, falling back to CPU-only build\n' >&2
+    fct_install_torch_cpu_only
+}
+
+fct_install_python_requirements_except_torch() {
+    local filtered_requirements=""
+    filtered_requirements="$(mktemp)"
+
+    awk '
+        BEGIN { IGNORECASE = 1 }
+        /^[[:space:]]*torch([[:space:]]*[<>=!~].*)?[[:space:]]*$/ { next }
+        { print }
+    ' "${REQUIREMENTS_FILE}" >"${filtered_requirements}"
+
+    "${VENV_DIR}/bin/python3" -m pip install -r "${filtered_requirements}"
+    rm -f "${filtered_requirements}"
 }
 
 fct_print_venv_recovery_hint() {
@@ -117,7 +268,8 @@ fct_prepare_python_env() {
     fi
 
     "${VENV_DIR}/bin/python3" -m pip install --upgrade pip wheel
-    "${VENV_DIR}/bin/python3" -m pip install -r "${REQUIREMENTS_FILE}"
+    fct_install_python_requirements_except_torch
+    fct_install_torch_for_driver
 }
 
 fct_main() {
