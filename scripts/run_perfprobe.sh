@@ -103,27 +103,27 @@ fct_get_torch_cuda_channels() {
         return
     fi
 
-    if [[ "${cuda_int}" -ge 12080 ]]; then
+    if [[ "${cuda_int}" -ge 1208 ]]; then
         printf '%s\n' "cu128 cu126 cu124 cu121 cu118"
         return
     fi
 
-    if [[ "${cuda_int}" -ge 12060 ]]; then
+    if [[ "${cuda_int}" -ge 1206 ]]; then
         printf '%s\n' "cu126 cu124 cu121 cu118"
         return
     fi
 
-    if [[ "${cuda_int}" -ge 12040 ]]; then
+    if [[ "${cuda_int}" -ge 1204 ]]; then
         printf '%s\n' "cu124 cu121 cu118"
         return
     fi
 
-    if [[ "${cuda_int}" -ge 12010 ]]; then
+    if [[ "${cuda_int}" -ge 1201 ]]; then
         printf '%s\n' "cu121 cu118"
         return
     fi
 
-    if [[ "${cuda_int}" -ge 11080 ]]; then
+    if [[ "${cuda_int}" -ge 1108 ]]; then
         printf '%s\n' "cu118"
         return
     fi
