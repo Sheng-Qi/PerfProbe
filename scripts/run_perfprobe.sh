@@ -40,6 +40,7 @@ fct_install_system_deps() {
     if command -v apt-get >/dev/null 2>&1; then
         fct_run_with_privilege apt-get update || true
         fct_run_with_privilege apt-get install -y dmidecode ethtool fio pciutils util-linux || true
+        fct_run_with_privilege apt-get install -y python3-venv || true
         return
     fi
 
@@ -56,9 +57,63 @@ fct_install_system_deps() {
     printf 'Warning: unsupported package manager, skipped system dependency install\n' >&2
 }
 
+fct_get_python_minor_version() {
+    python3 -V 2>&1 | awk '{print $2}' | cut -d. -f1,2
+}
+
+fct_print_venv_recovery_hint() {
+    local py_minor="$1"
+
+    printf '\nError: failed to create Python virtual environment at %s\n' "${VENV_DIR}" >&2
+
+    if command -v apt-get >/dev/null 2>&1; then
+        printf 'Debian/Ubuntu fix (install at least one):\n' >&2
+        printf '  sudo apt-get install -y python3-venv\n' >&2
+        if [[ -n "${py_minor}" ]]; then
+            printf '  sudo apt-get install -y python%s-venv\n' "${py_minor}" >&2
+        fi
+        printf 'Then rerun: scripts/run_perfprobe.sh\n\n' >&2
+        return
+    fi
+
+    printf 'Install your distro Python venv package, then rerun: scripts/run_perfprobe.sh\n\n' >&2
+}
+
+fct_create_venv() {
+    local venv_output=""
+    local py_minor=""
+
+    if venv_output="$(python3 -m venv "${VENV_DIR}" 2>&1)"; then
+        return
+    fi
+
+    printf '%s\n' "${venv_output}" >&2
+
+    if ! printf '%s' "${venv_output}" | grep -qi 'ensurepip is not available'; then
+        fct_print_venv_recovery_hint ""
+        return 1
+    fi
+
+    py_minor="$(fct_get_python_minor_version || true)"
+
+    if command -v apt-get >/dev/null 2>&1; then
+        if [[ -n "${py_minor}" ]]; then
+            fct_run_with_privilege apt-get install -y "python${py_minor}-venv" || true
+        fi
+        fct_run_with_privilege apt-get install -y python3-venv || true
+
+        if python3 -m venv "${VENV_DIR}"; then
+            return
+        fi
+    fi
+
+    fct_print_venv_recovery_hint "${py_minor}"
+    return 1
+}
+
 fct_prepare_python_env() {
     if [[ ! -d "${VENV_DIR}" ]]; then
-        python3 -m venv "${VENV_DIR}"
+        fct_create_venv
     fi
 
     "${VENV_DIR}/bin/python3" -m pip install --upgrade pip wheel

@@ -105,6 +105,10 @@ This affects mount coverage and DIMM details availability. Permission-limited it
 - Disk benchmark failed:
   - Verify `fio` is installed and in `PATH`
   - Some filesystems may reject direct I/O; check disk section `skip_reason` for details
+- `.venv` creation failed with `ensurepip is not available`:
+  - On Debian/Ubuntu, install venv support and rerun:
+    - `sudo apt-get install -y python3-venv`
+    - `sudo apt-get install -y python3.10-venv` (match your `python3 -V` minor version)
 
 ## Development notes
 
